@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>PiP 시계</title>
+<style>
+  body { margin: 0; padding: 24px; background: #111; color: #eee; font: 16px -apple-system, sans-serif; }
+  video { width: 100%; border-radius: 12px; background: #000; }
+  button { width: 100%; margin-top: 16px; padding: 16px; font-size: 18px; border: 0; border-radius: 12px;
+           background: #0a84ff; color: #fff; }
+  button.secondary { background: #333; }
+  #log { margin-top: 16px; font: 12px ui-monospace, monospace; color: #888; white-space: pre-wrap; }
+</style>
+</head>
+<body>
+<video id="video" muted playsinline autoplay></video>
+<button id="pip">PiP 시작</button>
+<button id="mode" class="secondary">모드: 시계</button>
+<div id="log"></div>
+
+<script>
+// Draws a clock (or countdown) on a canvas, streams it into a <video>, and puts
+// that video in Picture-in-Picture so it floats over other apps.
+// ?t=5 starts in countdown mode with 5 minutes.
+const W = 480, H = 270
+const canvas = Object.assign(document.createElement("canvas"), { width: W, height: H })
+const ctx = canvas.getContext("2d")
+const video = document.getElementById("video")
+const logEl = document.getElementById("log")
+const log = (m) => { logEl.textContent += m + "\n" }
+
+const params = new URLSearchParams(location.search)
+let mode = params.has("t") ? "timer" : "clock"
+let timerEnd = Date.now() + Number(params.get("t") || 5) * 60000
+
+const pad = (n) => String(n).padStart(2, "0")
+
+function draw() {
+  const now = new Date()
+  let big, small
+  if (mode === "clock") {
+    big = `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`
+    small = now.toLocaleDateString("ko-KR", { month: "long", day: "numeric", weekday: "short" })
+  } else {
+    const left = Math.max(0, Math.round((timerEnd - now) / 1000))
+    big = `${pad(Math.floor(left / 60))}:${pad(left % 60)}`
+    small = left ? "남은 시간" : "끝!"
+  }
+  ctx.fillStyle = mode === "timer" && big === "00:00" ? "#c0392b" : "#000"
+  ctx.fillRect(0, 0, W, H)
+  ctx.fillStyle = "#fff"
+  ctx.textAlign = "center"
+  ctx.textBaseline = "middle"
+  ctx.font = "bold 110px -apple-system, sans-serif"
+  ctx.fillText(big, W / 2, H / 2 - 15)
+  ctx.font = "32px -apple-system, sans-serif"
+  ctx.fillStyle = "#aaa"
+  ctx.fillText(small, W / 2, H / 2 + 75)
+}
+
+draw()
+setInterval(draw, 250)
+
+if (canvas.captureStream) {
+  video.srcObject = canvas.captureStream(30)
+  log("captureStream: OK")
+} else {
+  log("captureStream 미지원 — 이 브라우저에선 안 됨")
+}
+log("requestPictureInPicture: " + ("requestPictureInPicture" in video ? "있음" : "없음"))
+log("webkitSetPresentationMode: " + (typeof video.webkitSetPresentationMode === "function" ? "있음" : "없음"))
+
+document.getElementById("pip").onclick = async () => {
+  try {
+    await video.play()
+    if (document.pictureInPictureEnabled && video.requestPictureInPicture) {
+      await video.requestPictureInPicture()
+    } else if (video.webkitSupportsPresentationMode && video.webkitSupportsPresentationMode("picture-in-picture")) {
+      video.webkitSetPresentationMode("picture-in-picture")
+    } else {
+      throw new Error("PiP 미지원")
+    }
+    log("PiP 요청 보냄")
+  } catch (e) {
+    log("실패: " + e.message)
+  }
+}
+
+document.getElementById("mode").onclick = (e) => {
+  if (mode === "clock") {
+    const min = Number(prompt("몇 분 타이머?", "5"))
+    if (!min) return
+    timerEnd = Date.now() + min * 60000
+    mode = "timer"
+    e.target.textContent = `모드: ${min}분 타이머`
+  } else {
+    mode = "clock"
+    e.target.textContent = "모드: 시계"
+  }
+  draw()
+}
+</script>
+</body>
+</html>
