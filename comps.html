@@ -215,12 +215,35 @@ document.getElementById("auto").onchange = (e) => {
   if (sec) autoTimer = setInterval(() => select(idx + 1), sec * 1000)
 }
 
-// Media session buttons show up on some PiP controls; map them to prev/next.
+// iOS PiP on a live stream only offers play/pause, so that button becomes the
+// pager: one tap = next comp, two quick taps = previous. Playback resumes at once.
+let taps = 0, tapTimer = null, lastTap = 0
+function onPipButton() {
+  const now = Date.now()
+  if (now - lastTap < 150) return   // pause event + media session can both fire for one tap
+  lastTap = now
+  taps++
+  clearTimeout(tapTimer)
+  tapTimer = setTimeout(() => {
+    select(taps >= 2 ? idx - 1 : idx + 1)
+    taps = 0
+  }, 600)
+  video.play().catch(() => {})
+}
+video.addEventListener("pause", onPipButton)
+
 if ("mediaSession" in navigator) {
-  try {
-    navigator.mediaSession.setActionHandler("nexttrack", () => select(idx + 1))
-    navigator.mediaSession.setActionHandler("previoustrack", () => select(idx - 1))
-  } catch (e) {}
+  const handlers = {
+    play: onPipButton,
+    pause: onPipButton,
+    nexttrack: () => select(idx + 1),
+    previoustrack: () => select(idx - 1),
+    seekforward: () => select(idx + 1),
+    seekbackward: () => select(idx - 1),
+  }
+  for (const [action, fn] of Object.entries(handlers)) {
+    try { navigator.mediaSession.setActionHandler(action, fn) } catch (e) {}
+  }
 }
 
 draw()
