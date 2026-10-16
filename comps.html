@@ -219,42 +219,17 @@ function syncFromVideo() {
   if (!fileMode || !comps.length) return
   const i = Math.min(Math.max(Math.floor(video.currentTime / SEG), 0), comps.length - 1)
   if (i !== idx) { idx = i; renderList() }
-  updatePosition()
 }
-video.addEventListener("seeked", syncFromVideo)
-video.addEventListener("timeupdate", syncFromVideo)
-video.addEventListener("seeking", () => log("seeking → " + video.currentTime.toFixed(1)))
-video.addEventListener("seeked", () => log("seeked ✓ " + video.currentTime.toFixed(1)))
-video.addEventListener("error", () => log("video error: " + (video.error && video.error.message)))
-video.addEventListener("loadedmetadata", () => {
-  const r = video.seekable
-  log(`길이 ${video.duration}s · seekable ${r.length ? r.start(0) + "~" + r.end(r.length - 1) : "없음"}`)
+// iOS skip buttons seek relative to the real currentTime; follow the target as
+// soon as seeking starts, and nudge playback so a paused PiP repaints the frame.
+video.addEventListener("seeking", () => { log("seeking → " + video.currentTime.toFixed(1)); syncFromVideo() })
+video.addEventListener("seeked", () => {
+  syncFromVideo()
+  if (video.paused && video.webkitPresentationMode === "picture-in-picture") {
+    video.play().then(() => video.pause()).catch(() => {})
+  }
 })
-
-// Tell iOS the media is seekable and route the PiP skip buttons to comp paging.
-function updatePosition() {
-  if (!("mediaSession" in navigator) || !navigator.mediaSession.setPositionState) return
-  if (!fileMode || !isFinite(video.duration)) return
-  try {
-    navigator.mediaSession.setPositionState({
-      duration: video.duration, playbackRate: 1,
-      position: Math.min(video.currentTime, video.duration),
-    })
-  } catch (e) {}
-}
-
-if ("mediaSession" in navigator) {
-  const handlers = {
-    seekforward: () => { log("PiP +10"); select(idx + 1) },
-    seekbackward: () => { log("PiP -10"); select(idx - 1) },
-    nexttrack: () => { log("PiP 다음"); select(idx + 1) },
-    previoustrack: () => { log("PiP 이전"); select(idx - 1) },
-    seekto: (d) => { log("PiP seekto " + d.seekTime); select(Math.floor(d.seekTime / SEG)) },
-  }
-  for (const [action, fn] of Object.entries(handlers)) {
-    try { navigator.mediaSession.setActionHandler(action, fn) } catch (e) { log(action + " 핸들러 실패") }
-  }
-}
+video.addEventListener("timeupdate", () => { if (!video.seeking) syncFromVideo() })
 
 async function buildVideo() {
   if (!("VideoEncoder" in window)) throw new Error("VideoEncoder 미지원")
