@@ -224,6 +224,12 @@ function syncFromVideo() {
 video.addEventListener("seeked", syncFromVideo)
 video.addEventListener("timeupdate", syncFromVideo)
 video.addEventListener("seeking", () => log("seeking → " + video.currentTime.toFixed(1)))
+video.addEventListener("seeked", () => log("seeked ✓ " + video.currentTime.toFixed(1)))
+video.addEventListener("error", () => log("video error: " + (video.error && video.error.message)))
+video.addEventListener("loadedmetadata", () => {
+  const r = video.seekable
+  log(`길이 ${video.duration}s · seekable ${r.length ? r.start(0) + "~" + r.end(r.length - 1) : "없음"}`)
+})
 
 // Tell iOS the media is seekable and route the PiP skip buttons to comp paging.
 function updatePosition() {
@@ -253,7 +259,7 @@ if ("mediaSession" in navigator) {
 async function buildVideo() {
   if (!("VideoEncoder" in window)) throw new Error("VideoEncoder 미지원")
   const { Muxer, ArrayBufferTarget } = await import(MUXER_URL)
-  const config = { codec: "avc1.42001f", width: W, height: H, bitrate: 1_000_000, framerate: 1 }
+  const config = { codec: "avc1.42001f", width: W, height: H, bitrate: 500_000, framerate: 1 }
   if (!(await VideoEncoder.isConfigSupported(config)).supported) throw new Error("H.264 인코딩 미지원")
   const target = new ArrayBufferTarget()
   const muxer = new Muxer({ target, video: { codec: "avc", width: W, height: H }, fastStart: "in-memory" })
@@ -265,10 +271,11 @@ async function buildVideo() {
   enc.configure(config)
   for (let i = 0; i < comps.length; i++) {
     draw(i)
-    // Two frames per segment so every segment has an explicit duration.
-    for (const off of [0, SEG / 2]) {
-      const f = new VideoFrame(canvas, { timestamp: (i * SEG + off) * 1e6, duration: (SEG / 2) * 1e6 })
-      enc.encode(f, { keyFrame: true })
+    // Constant 1 fps with a keyframe at each segment start; iOS refuses to
+    // seek into files with multi-second gaps between samples.
+    for (let sec = 0; sec < SEG; sec++) {
+      const f = new VideoFrame(canvas, { timestamp: (i * SEG + sec) * 1e6, duration: 1e6 })
+      enc.encode(f, { keyFrame: sec === 0 })
       f.close()
     }
   }
@@ -334,7 +341,9 @@ document.getElementById("pip").onclick = () => {
     log(`${set} · 덱 ${comps.length}개 · 갱신 ${new Date(raw.updated).toLocaleString("ko-KR")}`)
     renderList()
     try {
+      const t0 = Date.now()
       const url = await buildVideo()
+      log(`영상 생성 ${((Date.now() - t0) / 1000).toFixed(1)}초`)
       clearInterval(streamTimer)
       video.srcObject = null
       video.src = url
