@@ -37,8 +37,10 @@
 <div id="list">불러오는 중...</div>
 <div id="log"></div>
 
-<script type="module">
-import { Muxer, ArrayBufferTarget } from "https://cdn.jsdelivr.net/npm/mp4-muxer@5.2.2/build/mp4-muxer.mjs"
+<script>
+window.onerror = (m, src, line) => { document.getElementById("log").textContent += `에러: ${m} (${line})\n` }
+window.onunhandledrejection = (e) => { document.getElementById("log").textContent += `에러: ${e.reason}\n` }
+const MUXER_URL = "https://cdn.jsdelivr.net/npm/mp4-muxer@5.2.2/build/mp4-muxer.mjs"
 
 // Shows MetaTFT ranked comps one at a time on a canvas that is streamed into a
 // Picture-in-Picture video, so the guide floats over the game.
@@ -223,6 +225,7 @@ video.addEventListener("timeupdate", syncFromVideo)
 
 async function buildVideo() {
   if (!("VideoEncoder" in window)) throw new Error("VideoEncoder 미지원")
+  const { Muxer, ArrayBufferTarget } = await import(MUXER_URL)
   const config = { codec: "avc1.42001f", width: W, height: H, bitrate: 1_000_000, framerate: 1 }
   if (!(await VideoEncoder.isConfigSupported(config)).supported) throw new Error("H.264 인코딩 미지원")
   const target = new ArrayBufferTarget()
@@ -264,9 +267,17 @@ let streamTimer = setInterval(() => { if (!fileMode) draw() }, 500)
 video.srcObject = canvas.captureStream(10)
 video.play().catch(() => {})
 
-// PiP must be requested synchronously inside the tap handler.
+// PiP must be requested synchronously inside the tap handler. The video has to be
+// playing to enter PiP; in file mode it is paused again once PiP is up.
+video.addEventListener("webkitpresentationmodechanged", () => {
+  log("모드: " + video.webkitPresentationMode)
+  if (fileMode && video.webkitPresentationMode === "picture-in-picture") video.pause()
+})
+video.addEventListener("enterpictureinpicture", () => { if (fileMode) video.pause() })
+
 document.getElementById("pip").onclick = () => {
-  if (!fileMode) video.play().catch((e) => log("play 실패: " + e.message))
+  log("PiP 버튼 눌림 (" + (fileMode ? "영상" : "스트림") + " 모드)")
+  video.play().catch((e) => log("play 실패: " + e.message))
   try {
     if (video.webkitSupportsPresentationMode && video.webkitSupportsPresentationMode("picture-in-picture")) {
       video.webkitSetPresentationMode("picture-in-picture")
