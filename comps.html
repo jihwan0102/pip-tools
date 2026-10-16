@@ -20,7 +20,7 @@
 </style>
 </head>
 <body>
-<video id="video" muted playsinline autoplay></video>
+<video id="video" muted playsinline></video>
 <div class="row">
   <button id="prev">◀</button>
   <button id="pip" class="primary">PiP 시작</button>
@@ -37,7 +37,9 @@
 <div id="list">불러오는 중...</div>
 <div id="log"></div>
 
-<script>
+<script type="module">
+import { Muxer, ArrayBufferTarget } from "https://cdn.jsdelivr.net/npm/mp4-muxer@5.2.2/build/mp4-muxer.mjs"
+
 // Shows MetaTFT ranked comps one at a time on a canvas that is streamed into a
 // Picture-in-Picture video, so the guide floats over the game.
 const COMPS_URL = "https://api-hc.metatft.com/tft-comps-api/comps_data?queue=1100"
@@ -124,12 +126,12 @@ function buildComps(raw, lk) {
     })
 }
 
-function draw() {
+function draw(i = idx) {
   ctx.fillStyle = "#0b0b0f"
   ctx.fillRect(0, 0, W, H)
   ctx.textBaseline = "top"
   ctx.textAlign = "left"
-  const c = comps[idx]
+  const c = comps[i]
   if (!c) {
     ctx.fillStyle = "#fff"
     ctx.font = "40px -apple-system, sans-serif"
@@ -147,7 +149,7 @@ function draw() {
   ctx.textAlign = "left"
   ctx.fillStyle = "#fff"
   ctx.font = "bold 46px -apple-system, sans-serif"
-  ctx.fillText(`${idx + 1}. ${c.title}`, 112, 32, W - 140)
+  ctx.fillText(`${i + 1}. ${c.title}`, 112, 32, W - 140)
   ctx.fillStyle = "#aaa"
   ctx.font = "26px -apple-system, sans-serif"
   ctx.fillText(`평균 ${c.avg.toFixed(2)}등 · ${c.level}`, 112, 86)
@@ -183,7 +185,7 @@ function draw() {
   ctx.fillText(c.traits.join("  "), 30, H - 50, W - 60)
   ctx.fillStyle = "#555"
   ctx.textAlign = "right"
-  ctx.fillText(`${idx + 1}/${comps.length}`, W - 30, H - 50)
+  ctx.fillText(`${i + 1}/${comps.length}`, W - 30, H - 50)
 }
 
 function renderList() {
@@ -198,11 +200,52 @@ function renderList() {
   })
 }
 
+// Each comp becomes a SEG-second still segment of a real MP4, so the PiP
+// skip ±10s buttons land exactly on the previous/next comp.
+const SEG = 10
+let fileMode = false
+
 function select(i) {
   if (!comps.length) return
-  idx = (i + comps.length) % comps.length
-  draw()
+  idx = Math.min(Math.max(i, 0), comps.length - 1)
+  if (fileMode) video.currentTime = idx * SEG + SEG / 2
+  else draw()
   renderList()
+}
+
+function syncFromVideo() {
+  if (!fileMode || !comps.length) return
+  const i = Math.min(Math.max(Math.floor(video.currentTime / SEG), 0), comps.length - 1)
+  if (i !== idx) { idx = i; renderList() }
+}
+video.addEventListener("seeked", syncFromVideo)
+video.addEventListener("timeupdate", syncFromVideo)
+
+async function buildVideo() {
+  if (!("VideoEncoder" in window)) throw new Error("VideoEncoder 미지원")
+  const config = { codec: "avc1.42001f", width: W, height: H, bitrate: 1_000_000, framerate: 1 }
+  if (!(await VideoEncoder.isConfigSupported(config)).supported) throw new Error("H.264 인코딩 미지원")
+  const target = new ArrayBufferTarget()
+  const muxer = new Muxer({ target, video: { codec: "avc", width: W, height: H }, fastStart: "in-memory" })
+  let encError = null
+  const enc = new VideoEncoder({
+    output: (chunk, meta) => muxer.addVideoChunk(chunk, meta),
+    error: (e) => { encError = e },
+  })
+  enc.configure(config)
+  for (let i = 0; i < comps.length; i++) {
+    draw(i)
+    // Two frames per segment so every segment has an explicit duration.
+    for (const off of [0, SEG / 2]) {
+      const f = new VideoFrame(canvas, { timestamp: (i * SEG + off) * 1e6, duration: (SEG / 2) * 1e6 })
+      enc.encode(f, { keyFrame: true })
+      f.close()
+    }
+  }
+  await enc.flush()
+  if (encError) throw encError
+  muxer.finalize()
+  return URL.createObjectURL(new Blob([target.buffer], { type: "video/mp4" }))
 }
 
 document.getElementById("prev").onclick = () => select(idx - 1)
@@ -212,48 +255,18 @@ let autoTimer = null
 document.getElementById("auto").onchange = (e) => {
   clearInterval(autoTimer)
   const sec = Number(e.target.value)
-  if (sec) autoTimer = setInterval(() => select(idx + 1), sec * 1000)
+  if (sec) autoTimer = setInterval(() => select(idx + 1 < comps.length ? idx + 1 : 0), sec * 1000)
 }
 
-// iOS PiP on a live stream only offers play/pause, so that button becomes the
-// pager: one tap = next comp, two quick taps = previous. Playback resumes at once.
-let taps = 0, tapTimer = null, lastTap = 0
-function onPipButton() {
-  const now = Date.now()
-  if (now - lastTap < 150) return   // pause event + media session can both fire for one tap
-  lastTap = now
-  taps++
-  clearTimeout(tapTimer)
-  tapTimer = setTimeout(() => {
-    select(taps >= 2 ? idx - 1 : idx + 1)
-    taps = 0
-  }, 600)
-  video.play().catch(() => {})
-}
-video.addEventListener("pause", onPipButton)
-
-if ("mediaSession" in navigator) {
-  const handlers = {
-    play: onPipButton,
-    pause: onPipButton,
-    nexttrack: () => select(idx + 1),
-    previoustrack: () => select(idx - 1),
-    seekforward: () => select(idx + 1),
-    seekbackward: () => select(idx - 1),
-  }
-  for (const [action, fn] of Object.entries(handlers)) {
-    try { navigator.mediaSession.setActionHandler(action, fn) } catch (e) {}
-  }
-}
-
+// Live-stream fallback until (or unless) the MP4 is ready.
 draw()
-// Redraw continuously so the stream keeps producing frames.
-setInterval(draw, 500)
+let streamTimer = setInterval(() => { if (!fileMode) draw() }, 500)
 video.srcObject = canvas.captureStream(10)
+video.play().catch(() => {})
 
 // PiP must be requested synchronously inside the tap handler.
 document.getElementById("pip").onclick = () => {
-  video.play().catch((e) => log("play 실패: " + e.message))
+  if (!fileMode) video.play().catch((e) => log("play 실패: " + e.message))
   try {
     if (video.webkitSupportsPresentationMode && video.webkitSupportsPresentationMode("picture-in-picture")) {
       video.webkitSetPresentationMode("picture-in-picture")
@@ -274,7 +287,19 @@ document.getElementById("pip").onclick = () => {
     const lk = await (await fetch(LOOKUP_URL(set))).json()
     comps = buildComps(raw, lk)
     log(`${set} · 덱 ${comps.length}개 · 갱신 ${new Date(raw.updated).toLocaleString("ko-KR")}`)
-    select(0)
+    renderList()
+    try {
+      const url = await buildVideo()
+      clearInterval(streamTimer)
+      video.srcObject = null
+      video.src = url
+      fileMode = true
+      video.addEventListener("loadedmetadata", () => select(idx), { once: true })
+      log("영상 모드: PiP ±10초 버튼으로 덱 이동")
+    } catch (e) {
+      log("영상 생성 실패, 스트림 모드 사용: " + e.message)
+      select(0)
+    }
   } catch (e) {
     listEl.textContent = "불러오기 실패: " + e.message
   }
