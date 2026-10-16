@@ -71,17 +71,24 @@ if (canvas.captureStream) {
 log("requestPictureInPicture: " + ("requestPictureInPicture" in video ? "있음" : "없음"))
 log("webkitSetPresentationMode: " + (typeof video.webkitSetPresentationMode === "function" ? "있음" : "없음"))
 
-document.getElementById("pip").onclick = async () => {
+video.addEventListener("webkitpresentationmodechanged", () => log("모드 변경: " + video.webkitPresentationMode))
+video.addEventListener("enterpictureinpicture", () => log("PiP 진입"))
+
+// PiP must be requested synchronously inside the tap handler; awaiting anything
+// first (even play()) makes iOS treat it as not user-initiated.
+document.getElementById("pip").onclick = () => {
+  video.play().catch((e) => log("play 실패: " + e.message))
   try {
-    await video.play()
-    if (document.pictureInPictureEnabled && video.requestPictureInPicture) {
-      await video.requestPictureInPicture()
-    } else if (video.webkitSupportsPresentationMode && video.webkitSupportsPresentationMode("picture-in-picture")) {
+    if (video.webkitSupportsPresentationMode && video.webkitSupportsPresentationMode("picture-in-picture")) {
       video.webkitSetPresentationMode("picture-in-picture")
+      log("PiP 요청 보냄 (webkit)")
+    } else if (document.pictureInPictureEnabled) {
+      video.requestPictureInPicture()
+        .then(() => log("PiP 요청 성공"))
+        .catch((e) => log("실패: " + e.message))
     } else {
-      throw new Error("PiP 미지원")
+      log("PiP 미지원")
     }
-    log("PiP 요청 보냄")
   } catch (e) {
     log("실패: " + e.message)
   }
