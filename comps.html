@@ -219,9 +219,36 @@ function syncFromVideo() {
   if (!fileMode || !comps.length) return
   const i = Math.min(Math.max(Math.floor(video.currentTime / SEG), 0), comps.length - 1)
   if (i !== idx) { idx = i; renderList() }
+  updatePosition()
 }
 video.addEventListener("seeked", syncFromVideo)
 video.addEventListener("timeupdate", syncFromVideo)
+video.addEventListener("seeking", () => log("seeking → " + video.currentTime.toFixed(1)))
+
+// Tell iOS the media is seekable and route the PiP skip buttons to comp paging.
+function updatePosition() {
+  if (!("mediaSession" in navigator) || !navigator.mediaSession.setPositionState) return
+  if (!fileMode || !isFinite(video.duration)) return
+  try {
+    navigator.mediaSession.setPositionState({
+      duration: video.duration, playbackRate: 1,
+      position: Math.min(video.currentTime, video.duration),
+    })
+  } catch (e) {}
+}
+
+if ("mediaSession" in navigator) {
+  const handlers = {
+    seekforward: () => { log("PiP +10"); select(idx + 1) },
+    seekbackward: () => { log("PiP -10"); select(idx - 1) },
+    nexttrack: () => { log("PiP 다음"); select(idx + 1) },
+    previoustrack: () => { log("PiP 이전"); select(idx - 1) },
+    seekto: (d) => { log("PiP seekto " + d.seekTime); select(Math.floor(d.seekTime / SEG)) },
+  }
+  for (const [action, fn] of Object.entries(handlers)) {
+    try { navigator.mediaSession.setActionHandler(action, fn) } catch (e) { log(action + " 핸들러 실패") }
+  }
+}
 
 async function buildVideo() {
   if (!("VideoEncoder" in window)) throw new Error("VideoEncoder 미지원")
@@ -269,11 +296,18 @@ video.play().catch(() => {})
 
 // PiP must be requested synchronously inside the tap handler. The video has to be
 // playing to enter PiP; in file mode it is paused again once PiP is up.
+// Start paused on the chosen comp; pause again once play() has actually resumed.
+function pauseInPip() {
+  if (!fileMode) return
+  video.pause()
+  setTimeout(() => video.pause(), 300)
+  setTimeout(() => video.pause(), 1000)
+}
 video.addEventListener("webkitpresentationmodechanged", () => {
   log("모드: " + video.webkitPresentationMode)
-  if (fileMode && video.webkitPresentationMode === "picture-in-picture") video.pause()
+  if (video.webkitPresentationMode === "picture-in-picture") pauseInPip()
 })
-video.addEventListener("enterpictureinpicture", () => { if (fileMode) video.pause() })
+video.addEventListener("enterpictureinpicture", pauseInPip)
 
 document.getElementById("pip").onclick = () => {
   log("PiP 버튼 눌림 (" + (fileMode ? "영상" : "스트림") + " 모드)")
