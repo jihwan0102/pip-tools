@@ -1,0 +1,261 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>TFT 덱 PiP</title>
+<style>
+  body { margin: 0; padding: 16px; background: #111; color: #eee; font: 15px -apple-system, sans-serif; }
+  video { width: 100%; border-radius: 10px; background: #000; }
+  .row { display: flex; gap: 8px; margin-top: 10px; }
+  button, select { flex: 1; padding: 14px; font-size: 16px; border: 0; border-radius: 10px; background: #333; color: #fff; }
+  button.primary { background: #0a84ff; }
+  #list { margin-top: 12px; }
+  .comp { display: flex; align-items: center; gap: 10px; padding: 10px; border-radius: 8px; margin-bottom: 4px; background: #1c1c1e; }
+  .comp.sel { outline: 2px solid #0a84ff; }
+  .tier { width: 28px; text-align: center; font-weight: 700; border-radius: 6px; padding: 2px 0; color: #000; }
+  .name { flex: 1; }
+  .avg { color: #999; font-size: 13px; }
+  #log { margin-top: 10px; font: 11px ui-monospace, monospace; color: #777; white-space: pre-wrap; }
+</style>
+</head>
+<body>
+<video id="video" muted playsinline autoplay></video>
+<div class="row">
+  <button id="prev">◀</button>
+  <button id="pip" class="primary">PiP 시작</button>
+  <button id="next">▶</button>
+</div>
+<div class="row">
+  <select id="auto">
+    <option value="0">자동 넘김 끔</option>
+    <option value="10">10초마다 넘김</option>
+    <option value="20">20초마다 넘김</option>
+    <option value="40">40초마다 넘김</option>
+  </select>
+</div>
+<div id="list">불러오는 중...</div>
+<div id="log"></div>
+
+<script>
+// Shows MetaTFT ranked comps one at a time on a canvas that is streamed into a
+// Picture-in-Picture video, so the guide floats over the game.
+const COMPS_URL = "https://api-hc.metatft.com/tft-comps-api/comps_data?queue=1100"
+const LOOKUP_URL = (set) => `https://data.metatft.com/lookups/${set}_latest_ko_kr.json`
+const MIN_SHARE = 0.004   // hide comps under 0.4% of sampled boards
+const COST_COLORS = { 1: "#9aa4af", 2: "#22c55e", 3: "#3b82f6", 4: "#a855f7", 5: "#f5b301" }
+const TIER_COLORS = { S: "#ff7a7a", A: "#ffb86b", B: "#ffe66b", C: "#9be08f" }
+
+const W = 960, H = 540
+const canvas = Object.assign(document.createElement("canvas"), { width: W, height: H })
+const ctx = canvas.getContext("2d")
+const video = document.getElementById("video")
+const listEl = document.getElementById("list")
+const log = (m) => { document.getElementById("log").textContent += m + "\n" }
+
+let comps = []
+let idx = 0
+
+function tierOf(avg) {
+  return avg < 4.25 ? "S" : avg < 4.45 ? "A" : avg < 4.65 ? "B" : "C"
+}
+
+function levelText(s) {
+  if (!s) return ""
+  const m = s.match(/lvl (\d+)/i)
+  if (m) return `${m[1]}레벨 리롤`
+  const f = s.match(/fast (\d+)/i)
+  return f ? `빠른 ${f[1]}` : s
+}
+
+function buildComps(raw, lk) {
+  const unitByAsset = {}
+  for (const u of lk.units) for (const a of u.assetNames || []) unitByAsset[a] = u
+  for (const [asset, api] of Object.entries(lk.unitAssetNames || {})) {
+    if (!unitByAsset[asset]) unitByAsset[asset] = lk.units.find((u) => u.apiName === api)
+  }
+  const nameOf = {}
+  for (const t of lk.traits) nameOf[t.apiName] = t.name
+  for (const i of lk.items) nameOf[i.apiName] = i.name
+  const unitName = (a) => unitByAsset[a]?.name || a.replace(/^DA_(18_)?|18$/g, "")
+  const itemName = (a) => nameOf[a] || a.replace(/^DA_(18_)?/, "")
+
+  const clusters = Object.values(raw.results.data.cluster_details)
+  const total = clusters.reduce((s, c) => s + c.overall.count, 0)
+
+  return clusters
+    .filter((c) => c.overall.count / total >= MIN_SHARE)
+    .sort((a, b) => a.overall.avg - b.overall.avg)
+    .map((c) => {
+      const units = c.units_string.split(", ").map((a) => ({
+        name: unitName(a),
+        cost: unitByAsset[a]?.cost || 1,
+      })).sort((a, b) => a.cost - b.cost)
+
+      const traitCount = {}
+      for (const a of c.units_string.split(", ")) {
+        for (const t of unitByAsset[a]?.traits || []) traitCount[t] = (traitCount[t] || 0) + 1
+      }
+      const traits = Object.entries(traitCount)
+        .filter(([, n]) => n >= 2)
+        .sort((a, b) => b[1] - a[1])
+        .map(([t, n]) => `${t} ${n}`)
+
+      // Best-scoring 3-item build for each unit that has one, top 3 carries.
+      const best = {}
+      for (const b of c.builds || []) {
+        if (b.num_items !== 3) continue
+        if (!best[b.unit] || b.count > best[b.unit].count) best[b.unit] = b
+      }
+      const carries = Object.values(best)
+        .sort((a, b) => b.count - a.count)
+        .slice(0, 3)
+        .map((b) => ({ unit: unitName(b.unit), items: b.buildName.map(itemName) }))
+
+      const title = c.name.map((n) => (n.type === "unit" ? unitName(n.name) : nameOf[n.name] || n.name)).join(" ")
+      return {
+        title,
+        avg: c.overall.avg,
+        share: c.overall.count / total * 8,
+        tier: tierOf(c.overall.avg),
+        level: levelText(c.levelling),
+        units, traits, carries,
+      }
+    })
+}
+
+function draw() {
+  ctx.fillStyle = "#0b0b0f"
+  ctx.fillRect(0, 0, W, H)
+  ctx.textBaseline = "top"
+  ctx.textAlign = "left"
+  const c = comps[idx]
+  if (!c) {
+    ctx.fillStyle = "#fff"
+    ctx.font = "40px -apple-system, sans-serif"
+    ctx.fillText("불러오는 중...", 40, 40)
+    return
+  }
+
+  // Header: tier badge, rank, title
+  ctx.fillStyle = TIER_COLORS[c.tier]
+  ctx.fillRect(30, 28, 64, 64)
+  ctx.fillStyle = "#000"
+  ctx.font = "bold 46px -apple-system, sans-serif"
+  ctx.textAlign = "center"
+  ctx.fillText(c.tier, 62, 36)
+  ctx.textAlign = "left"
+  ctx.fillStyle = "#fff"
+  ctx.font = "bold 46px -apple-system, sans-serif"
+  ctx.fillText(`${idx + 1}. ${c.title}`, 112, 32, W - 140)
+  ctx.fillStyle = "#aaa"
+  ctx.font = "26px -apple-system, sans-serif"
+  ctx.fillText(`평균 ${c.avg.toFixed(2)}등 · ${c.level}`, 112, 86)
+
+  // Units as cost-coloured chips
+  let x = 30, y = 140
+  ctx.font = "bold 28px -apple-system, sans-serif"
+  for (const u of c.units) {
+    const w = ctx.measureText(u.name).width + 28
+    if (x + w > W - 30) { x = 30; y += 54 }
+    ctx.fillStyle = COST_COLORS[u.cost] || "#666"
+    ctx.fillRect(x, y, w, 44)
+    ctx.fillStyle = "#000"
+    ctx.fillText(u.name, x + 14, y + 7)
+    x += w + 10
+  }
+
+  // Carries with items
+  y += 70
+  ctx.font = "28px -apple-system, sans-serif"
+  for (const k of c.carries) {
+    ctx.fillStyle = "#ffd479"
+    ctx.fillText(k.unit, 30, y)
+    const off = ctx.measureText(k.unit).width + 16
+    ctx.fillStyle = "#ddd"
+    ctx.fillText(k.items.join(" · "), 30 + off, y, W - 60 - off)
+    y += 42
+  }
+
+  // Traits
+  ctx.fillStyle = "#8ab4ff"
+  ctx.font = "24px -apple-system, sans-serif"
+  ctx.fillText(c.traits.join("  "), 30, H - 50, W - 60)
+  ctx.fillStyle = "#555"
+  ctx.textAlign = "right"
+  ctx.fillText(`${idx + 1}/${comps.length}`, W - 30, H - 50)
+}
+
+function renderList() {
+  listEl.innerHTML = ""
+  comps.forEach((c, i) => {
+    const el = document.createElement("div")
+    el.className = "comp" + (i === idx ? " sel" : "")
+    el.innerHTML = `<span class="tier" style="background:${TIER_COLORS[c.tier]}">${c.tier}</span>
+      <span class="name">${c.title}</span><span class="avg">${c.avg.toFixed(2)}</span>`
+    el.onclick = () => select(i)
+    listEl.appendChild(el)
+  })
+}
+
+function select(i) {
+  if (!comps.length) return
+  idx = (i + comps.length) % comps.length
+  draw()
+  renderList()
+}
+
+document.getElementById("prev").onclick = () => select(idx - 1)
+document.getElementById("next").onclick = () => select(idx + 1)
+
+let autoTimer = null
+document.getElementById("auto").onchange = (e) => {
+  clearInterval(autoTimer)
+  const sec = Number(e.target.value)
+  if (sec) autoTimer = setInterval(() => select(idx + 1), sec * 1000)
+}
+
+// Media session buttons show up on some PiP controls; map them to prev/next.
+if ("mediaSession" in navigator) {
+  try {
+    navigator.mediaSession.setActionHandler("nexttrack", () => select(idx + 1))
+    navigator.mediaSession.setActionHandler("previoustrack", () => select(idx - 1))
+  } catch (e) {}
+}
+
+draw()
+// Redraw continuously so the stream keeps producing frames.
+setInterval(draw, 500)
+video.srcObject = canvas.captureStream(10)
+
+// PiP must be requested synchronously inside the tap handler.
+document.getElementById("pip").onclick = () => {
+  video.play().catch((e) => log("play 실패: " + e.message))
+  try {
+    if (video.webkitSupportsPresentationMode && video.webkitSupportsPresentationMode("picture-in-picture")) {
+      video.webkitSetPresentationMode("picture-in-picture")
+    } else if (document.pictureInPictureEnabled) {
+      video.requestPictureInPicture().catch((e) => log("실패: " + e.message))
+    } else {
+      log("PiP 미지원")
+    }
+  } catch (e) {
+    log("실패: " + e.message)
+  }
+}
+
+;(async () => {
+  try {
+    const raw = await (await fetch(COMPS_URL)).json()
+    const set = raw.results.data.tft_set || raw.tft_set
+    const lk = await (await fetch(LOOKUP_URL(set))).json()
+    comps = buildComps(raw, lk)
+    log(`${set} · 덱 ${comps.length}개 · 갱신 ${new Date(raw.updated).toLocaleString("ko-KR")}`)
+    select(0)
+  } catch (e) {
+    listEl.textContent = "불러오기 실패: " + e.message
+  }
+})()
+</script>
+</body>
+</html>
