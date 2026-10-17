@@ -49,6 +49,25 @@ const LOOKUP_URL = (set) => `https://data.metatft.com/lookups/${set}_latest_ko_k
 const MIN_SHARE = 0.004   // hide comps under 0.4% of sampled boards
 const COST_COLORS = { 1: "#9aa4af", 2: "#22c55e", 3: "#3b82f6", 4: "#a855f7", 5: "#f5b301" }
 const TIER_COLORS = { S: "#ff7a7a", A: "#ffb86b", B: "#ffe66b", C: "#9be08f" }
+const ICON = (kind, name) =>
+  `https://cdn.metatft.com/cdn-cgi/image/width=96,height=96,format=png/https://cdn.metatft.com/file/metatft/${kind}/${name.toLowerCase()}.png`
+
+// Icons are drawn into the canvas, so they must load with CORS or the canvas
+// becomes tainted and can no longer be encoded.
+const images = {}
+function loadImage(url) {
+  if (!images[url]) {
+    images[url] = new Promise((resolve) => {
+      const img = new Image()
+      img.crossOrigin = "anonymous"
+      img.onload = () => { images[url].img = img; resolve(img) }
+      img.onerror = () => resolve(null)
+      img.src = url
+    })
+  }
+  return images[url]
+}
+const imageOf = (url) => images[url]?.img
 
 const W = 960, H = 540
 const canvas = Object.assign(document.createElement("canvas"), { width: W, height: H })
@@ -82,6 +101,7 @@ function buildComps(raw, lk) {
   for (const t of lk.traits) nameOf[t.apiName] = t.name
   for (const i of lk.items) nameOf[i.apiName] = i.name
   const unitName = (a) => unitByAsset[a]?.name || a.replace(/^DA_(18_)?|18$/g, "")
+  const unitIcon = (a) => ICON("champions", unitByAsset[a]?.apiName || a)
   const itemName = (a) => nameOf[a] || a.replace(/^DA_(18_)?/, "")
 
   const clusters = Object.values(raw.results.data.cluster_details)
@@ -91,9 +111,14 @@ function buildComps(raw, lk) {
     .filter((c) => c.overall.count / total >= MIN_SHARE)
     .sort((a, b) => a.overall.avg - b.overall.avg)
     .map((c) => {
+      // `stars` lists units commonly 3-starred in this cluster; it can name
+      // units outside the final board, so only mark the ones on it.
+      const stars = new Set(c.stars || [])
       const units = c.units_string.split(", ").map((a) => ({
         name: unitName(a),
         cost: unitByAsset[a]?.cost || 1,
+        icon: unitIcon(a),
+        three: stars.has(a),
       })).sort((a, b) => a.cost - b.cost)
 
       const traitCount = {}
@@ -114,7 +139,13 @@ function buildComps(raw, lk) {
       const carries = Object.values(best)
         .sort((a, b) => b.count - a.count)
         .slice(0, 3)
-        .map((b) => ({ unit: unitName(b.unit), items: b.buildName.map(itemName) }))
+        .map((b) => ({
+          name: unitName(b.unit),
+          icon: unitIcon(b.unit),
+          cost: unitByAsset[b.unit]?.cost || 1,
+          three: stars.has(b.unit),
+          items: b.buildName.map((i) => ({ name: itemName(i), icon: ICON("items", i) })),
+        }))
 
       const title = c.name.map((n) => (n.type === "unit" ? unitName(n.name) : nameOf[n.name] || n.name)).join(" ")
       return {
@@ -126,6 +157,36 @@ function buildComps(raw, lk) {
         units, traits, carries,
       }
     })
+}
+
+function drawIcon(url, label, x, y, size, border) {
+  ctx.fillStyle = border
+  ctx.fillRect(x - 3, y - 3, size + 6, size + 6)
+  const img = imageOf(url)
+  if (img) {
+    ctx.drawImage(img, x, y, size, size)
+  } else {
+    ctx.fillStyle = "#222"
+    ctx.fillRect(x, y, size, size)
+    ctx.fillStyle = "#fff"
+    ctx.font = "bold 16px -apple-system, sans-serif"
+    ctx.textAlign = "center"
+    ctx.fillText(label.slice(0, 4), x + size / 2, y + size / 2 - 8, size - 4)
+    ctx.textAlign = "left"
+  }
+}
+
+function drawUnit(u, x, y, size) {
+  drawIcon(u.icon, u.name, x, y, size, COST_COLORS[u.cost] || "#666")
+  if (!u.three) return
+  ctx.font = `bold ${Math.round(size * 0.3)}px -apple-system, sans-serif`
+  ctx.textAlign = "center"
+  ctx.lineWidth = 4
+  ctx.strokeStyle = "#000"
+  ctx.strokeText("★★★", x + size / 2, y - size * 0.32)
+  ctx.fillStyle = "#ffd700"
+  ctx.fillText("★★★", x + size / 2, y - size * 0.32)
+  ctx.textAlign = "left"
 }
 
 function draw(i = idx) {
@@ -156,30 +217,22 @@ function draw(i = idx) {
   ctx.font = "26px -apple-system, sans-serif"
   ctx.fillText(`평균 ${c.avg.toFixed(2)}등 · ${c.level}`, 112, 86)
 
-  // Units as cost-coloured chips
-  let x = 30, y = 140
-  ctx.font = "bold 28px -apple-system, sans-serif"
+  // Units as cost-bordered portraits, gold stars on the ones to 3-star
+  const n = c.units.length
+  const size = Math.min(100, Math.floor((W - 60 - (n - 1) * 8) / n))
+  let x = 30
   for (const u of c.units) {
-    const w = ctx.measureText(u.name).width + 28
-    if (x + w > W - 30) { x = 30; y += 54 }
-    ctx.fillStyle = COST_COLORS[u.cost] || "#666"
-    ctx.fillRect(x, y, w, 44)
-    ctx.fillStyle = "#000"
-    ctx.fillText(u.name, x + 14, y + 7)
-    x += w + 10
+    drawUnit(u, x, 156, size)
+    x += size + 8
   }
 
-  // Carries with items
-  y += 70
-  ctx.font = "28px -apple-system, sans-serif"
-  for (const k of c.carries) {
-    ctx.fillStyle = "#ffd479"
-    ctx.fillText(k.unit, 30, y)
-    const off = ctx.measureText(k.unit).width + 16
-    ctx.fillStyle = "#ddd"
-    ctx.fillText(k.items.join(" · "), 30 + off, y, W - 60 - off)
-    y += 42
-  }
+  // Carries: portrait plus their three items
+  const colW = (W - 60) / 3
+  c.carries.forEach((k, j) => {
+    const cx = 30 + j * colW
+    drawUnit(k, cx, 330, 84)
+    k.items.forEach((it, m) => drawIcon(it.icon, it.name, cx + 94 + m * 66, 342, 60, "#444"))
+  })
 
   // Traits
   ctx.fillStyle = "#8ab4ff"
@@ -311,6 +364,13 @@ document.getElementById("pip").onclick = () => {
     comps = buildComps(raw, lk)
     log(`${set} · 덱 ${comps.length}개 · 갱신 ${new Date(raw.updated).toLocaleString("ko-KR")}`)
     renderList()
+    const urls = new Set(comps.flatMap((c) => [
+      ...c.units.map((u) => u.icon),
+      ...c.carries.flatMap((k) => [k.icon, ...k.items.map((it) => it.icon)]),
+    ]))
+    const loaded = await Promise.all([...urls].map(loadImage))
+    log(`아이콘 ${loaded.filter(Boolean).length}/${urls.size}개`)
+    draw()
     try {
       const t0 = Date.now()
       const url = await buildVideo()
