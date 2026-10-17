@@ -210,26 +210,34 @@ let fileMode = false
 function select(i) {
   if (!comps.length) return
   idx = Math.min(Math.max(i, 0), comps.length - 1)
-  if (fileMode) video.currentTime = idx * SEG + SEG / 2
+  if (fileMode) seekTo(idx * SEG + 0.5)
   else draw()
   renderList()
 }
 
-function syncFromVideo() {
-  if (!fileMode || !comps.length) return
-  const i = Math.min(Math.max(Math.floor(video.currentTime / SEG), 0), comps.length - 1)
-  if (i !== idx) { idx = i; renderList() }
+// Seeks we issue ourselves (paging, looping) must not be mistaken for the
+// PiP skip buttons.
+let selfSeek = false
+function seekTo(t) {
+  selfSeek = true
+  video.currentTime = t
 }
-// iOS skip buttons seek relative to the real currentTime; follow the target as
-// soon as seeking starts, and nudge playback so a paused PiP repaints the frame.
-video.addEventListener("seeking", () => { log("seeking → " + video.currentTime.toFixed(1)); syncFromVideo() })
-video.addEventListener("seeked", () => {
-  syncFromVideo()
-  if (video.paused && video.webkitPresentationMode === "picture-in-picture") {
-    video.play().then(() => video.pause()).catch(() => {})
-  }
+
+// The video keeps playing so PiP always repaints (a paused PiP ignores seeks
+// visually); playback is held inside the current comp's segment instead.
+video.addEventListener("seeking", () => {
+  if (!fileMode || !comps.length) return
+  if (selfSeek) return
+  const i = Math.min(Math.max(Math.floor(video.currentTime / SEG), 0), comps.length - 1)
+  log(`skip → ${video.currentTime.toFixed(1)}s (덱 ${i + 1})`)
+  if (i !== idx) { idx = i; renderList() }
 })
-video.addEventListener("timeupdate", () => { if (!video.seeking) syncFromVideo() })
+video.addEventListener("seeked", () => { selfSeek = false })
+video.addEventListener("timeupdate", () => {
+  if (!fileMode || video.seeking) return
+  if (video.currentTime >= idx * SEG + SEG - 1.5 || video.currentTime < idx * SEG) seekTo(idx * SEG + 0.5)
+})
+video.addEventListener("ended", () => { seekTo(idx * SEG + 0.5); video.play().catch(() => {}) })
 
 async function buildVideo() {
   if (!("VideoEncoder" in window)) throw new Error("VideoEncoder 미지원")
@@ -246,11 +254,11 @@ async function buildVideo() {
   enc.configure(config)
   for (let i = 0; i < comps.length; i++) {
     draw(i)
-    // Constant 1 fps with a keyframe at each segment start; iOS refuses to
-    // seek into files with multi-second gaps between samples.
+    // Constant 1 fps, every frame a keyframe, so any seek lands on a complete
+    // image of the right comp.
     for (let sec = 0; sec < SEG; sec++) {
       const f = new VideoFrame(canvas, { timestamp: (i * SEG + sec) * 1e6, duration: 1e6 })
-      enc.encode(f, { keyFrame: sec === 0 })
+      enc.encode(f, { keyFrame: true })
       f.close()
     }
   }
@@ -276,20 +284,8 @@ let streamTimer = setInterval(() => { if (!fileMode) draw() }, 500)
 video.srcObject = canvas.captureStream(10)
 video.play().catch(() => {})
 
-// PiP must be requested synchronously inside the tap handler. The video has to be
-// playing to enter PiP; in file mode it is paused again once PiP is up.
-// Start paused on the chosen comp; pause again once play() has actually resumed.
-function pauseInPip() {
-  if (!fileMode) return
-  video.pause()
-  setTimeout(() => video.pause(), 300)
-  setTimeout(() => video.pause(), 1000)
-}
-video.addEventListener("webkitpresentationmodechanged", () => {
-  log("모드: " + video.webkitPresentationMode)
-  if (video.webkitPresentationMode === "picture-in-picture") pauseInPip()
-})
-video.addEventListener("enterpictureinpicture", pauseInPip)
+// PiP must be requested synchronously inside the tap handler, while playing.
+video.addEventListener("webkitpresentationmodechanged", () => log("모드: " + video.webkitPresentationMode))
 
 document.getElementById("pip").onclick = () => {
   log("PiP 버튼 눌림 (" + (fileMode ? "영상" : "스트림") + " 모드)")
@@ -323,7 +319,7 @@ document.getElementById("pip").onclick = () => {
       video.srcObject = null
       video.src = url
       fileMode = true
-      video.addEventListener("loadedmetadata", () => select(idx), { once: true })
+      video.addEventListener("loadedmetadata", () => { select(idx); video.play().catch(() => {}) }, { once: true })
       log("영상 모드: PiP ±10초 버튼으로 덱 이동")
     } catch (e) {
       log("영상 생성 실패, 스트림 모드 사용: " + e.message)
