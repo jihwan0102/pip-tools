@@ -34,6 +34,7 @@
     <option value="40">40초마다 넘김</option>
   </select>
 </div>
+<div id="updated" class="avg"></div>
 <div id="list">불러오는 중...</div>
 <div id="log"></div>
 
@@ -356,13 +357,27 @@ document.getElementById("pip").onclick = () => {
   }
 }
 
+// Comps are fetched on load; a page left open reloads once a day, but never
+// while PiP is up since a reload would close it.
+const REFRESH_MS = 24 * 60 * 60 * 1000
+const loadedAt = Date.now()
+function refreshIfStale() {
+  if (Date.now() - loadedAt < REFRESH_MS) return
+  if (video.webkitPresentationMode === "picture-in-picture" || document.pictureInPictureElement) return
+  location.reload()
+}
+setInterval(refreshIfStale, 10 * 60 * 1000)
+document.addEventListener("visibilitychange", () => { if (!document.hidden) refreshIfStale() })
+
 ;(async () => {
   try {
-    const raw = await (await fetch(COMPS_URL)).json()
+    const raw = await (await fetch(COMPS_URL, { cache: "no-store" })).json()
     const set = raw.results.data.tft_set || raw.tft_set
     const lk = await (await fetch(LOOKUP_URL(set))).json()
     comps = buildComps(raw, lk)
     log(`${set} · 덱 ${comps.length}개 · 갱신 ${new Date(raw.updated).toLocaleString("ko-KR")}`)
+    document.getElementById("updated").textContent =
+      `MetaTFT 데이터 ${new Date(raw.updated).toLocaleString("ko-KR")} · 하루마다 자동 새로고침`
     renderList()
     const urls = new Set(comps.flatMap((c) => [
       ...c.units.map((u) => u.icon),
