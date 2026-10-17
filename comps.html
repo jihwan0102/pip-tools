@@ -47,9 +47,12 @@ const MUXER_URL = "https://cdn.jsdelivr.net/npm/mp4-muxer@5.2.2/build/mp4-muxer.
 // Picture-in-Picture video, so the guide floats over the game.
 const COMPS_URL = "https://api-hc.metatft.com/tft-comps-api/comps_data?queue=1100"
 const LOOKUP_URL = (set) => `https://data.metatft.com/lookups/${set}_latest_ko_kr.json`
-const MIN_SHARE = 0.004   // hide comps under 0.4% of sampled boards
+// Same filters as the default metatft.com/comps view, so order and tiers match.
+const STATS_URL = (clusterId) => "https://api-hc.metatft.com/tft-comps-api/comps_stats?queue=1100&patch=current&days=3" +
+  `&rank=CHALLENGER,DIAMOND,EMERALD,GRANDMASTER,MASTER,PLATINUM&permit_filter_adjustment=true&cluster_id=${clusterId}`
+const MIN_PICK_RATE = 0.01
 const COST_COLORS = { 1: "#9aa4af", 2: "#22c55e", 3: "#3b82f6", 4: "#a855f7", 5: "#f5b301" }
-const TIER_COLORS = { S: "#ff7a7a", A: "#ffb86b", B: "#ffe66b", C: "#9be08f" }
+const TIER_COLORS = { S: "#ff7a7a", A: "#ffb86b", B: "#ffe66b", C: "#9be08f", D: "#8ab4ff" }
 const ICON = (kind, name) =>
   `https://cdn.metatft.com/cdn-cgi/image/width=96,height=96,format=png/https://cdn.metatft.com/file/metatft/${kind}/${name.toLowerCase()}.png`
 
@@ -81,7 +84,7 @@ let comps = []
 let idx = 0
 
 function tierOf(avg) {
-  return avg < 4.25 ? "S" : avg < 4.45 ? "A" : avg < 4.65 ? "B" : "C"
+  return avg < 4.25 ? "S" : avg < 4.5 ? "A" : avg < 4.75 ? "B" : avg < 5 ? "C" : "D"
 }
 
 function levelText(s) {
@@ -92,7 +95,13 @@ function levelText(s) {
   return f ? `빠른 ${f[1]}` : s
 }
 
-function buildComps(raw, lk) {
+function isEmblem(item) {
+  const api = item?.apiName || ""
+  return (item?.tags || []).includes("Emblem") || api.includes("Emblem") ||
+    (item?.composition || []).some((c) => c === "TFT_Item_Spatula" || c === "TFT_Item_FryingPan")
+}
+
+function buildComps(raw, stats, lk) {
   const unitByAsset = {}
   for (const u of lk.units) for (const a of u.assetNames || []) unitByAsset[a] = u
   for (const [asset, api] of Object.entries(lk.unitAssetNames || {})) {
@@ -105,13 +114,28 @@ function buildComps(raw, lk) {
   const unitIcon = (a) => ICON("champions", unitByAsset[a]?.apiName || a)
   const itemName = (a) => nameOf[a] || a.replace(/^DA_(18_)?/, "")
 
-  const clusters = Object.values(raw.results.data.cluster_details)
-  const total = clusters.reduce((s, c) => s + c.overall.count, 0)
+  const details = raw.results.data.cluster_details
+  const itemByApi = {}
+  for (const i of lk.items) itemByApi[i.apiName] = i
+  const total = stats.results.find((r) => r.cluster === "").places[0]
 
-  return clusters
-    .filter((c) => c.overall.count / total >= MIN_SHARE)
-    .sort((a, b) => a.overall.avg - b.overall.avg)
-    .map((c) => {
+  // Placement histogram -> avg, then the site's default hiding rules: low pick
+  // rate, augment-gated or emblem-gated comps, and weak clusters.
+  return stats.results
+    .filter((r) => r.cluster !== "" && r.cluster !== "-1" && details[r.cluster])
+    .map((r) => {
+      const places = r.places.slice(0, 8)
+      const count = places.reduce((a, b) => a + b, 0)
+      const avg = places.reduce((a, n, k) => a + (k + 1) * n, 0) / count
+      return { c: details[r.cluster], avg, pick: count / total * 8 }
+    })
+    .filter(({ c, pick }) =>
+      pick >= MIN_PICK_RATE &&
+      !c.name_string.includes("Augment") &&
+      !(c.top_itemNames || []).some((t) => t.pcnt >= 0.5 && isEmblem(itemByApi[t.itemNames])) &&
+      Math.max(...c.centroid) >= 1)
+    .sort((a, b) => a.avg - b.avg)
+    .map(({ c, avg, pick }) => {
       // `stars` lists units commonly 3-starred in this cluster; it can name
       // units outside the final board, so only mark the ones on it.
       const stars = new Set(c.stars || [])
@@ -151,9 +175,9 @@ function buildComps(raw, lk) {
       const title = c.name.map((n) => (n.type === "unit" ? unitName(n.name) : nameOf[n.name] || n.name)).join(" ")
       return {
         title,
-        avg: c.overall.avg,
-        share: c.overall.count / total * 8,
-        tier: tierOf(c.overall.avg),
+        avg,
+        pick,
+        tier: tierOf(avg),
         level: levelText(c.levelling),
         units, traits, carries,
       }
@@ -373,11 +397,14 @@ document.addEventListener("visibilitychange", () => { if (!document.hidden) refr
   try {
     const raw = await (await fetch(COMPS_URL, { cache: "no-store" })).json()
     const set = raw.results.data.tft_set || raw.tft_set
-    const lk = await (await fetch(LOOKUP_URL(set))).json()
-    comps = buildComps(raw, lk)
-    log(`${set} · 덱 ${comps.length}개 · 갱신 ${new Date(raw.updated).toLocaleString("ko-KR")}`)
+    const [lk, stats] = await Promise.all([
+      fetch(LOOKUP_URL(set)).then((r) => r.json()),
+      fetch(STATS_URL(raw.cluster_id), { cache: "no-store" }).then((r) => r.json()),
+    ])
+    comps = buildComps(raw, stats, lk)
+    log(`${set} · 덱 ${comps.length}개 · 갱신 ${new Date(stats.updated).toLocaleString("ko-KR")}`)
     document.getElementById("updated").textContent =
-      `MetaTFT 데이터 ${new Date(raw.updated).toLocaleString("ko-KR")} · 하루마다 자동 새로고침`
+      `MetaTFT 데이터 ${new Date(stats.updated).toLocaleString("ko-KR")} · 하루마다 자동 새로고침`
     renderList()
     const urls = new Set(comps.flatMap((c) => [
       ...c.units.map((u) => u.icon),
